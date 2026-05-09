@@ -2,12 +2,39 @@ import connection from "../database.js";
 
 import { handleServerError } from "../utils/errorHandler.js";
 
+import { isNotEmpty, isInEnum } from "../utils/validation.js";
+
+// CREATE BOOKING PROGRESS
 export const createBookingProgress = async (req, res) => {
   try {
     const { booking_id, status, notes } = req.body;
 
     const updated_by = req.user.id;
 
+    // VALIDATION
+    if (!isNotEmpty(booking_id) || !isNotEmpty(status) || !isNotEmpty(notes)) {
+      return res.status(400).json({
+        success: false,
+        message: "Semua field wajib diisi",
+      });
+    }
+
+    if (
+      !isInEnum(status, [
+        "accepted",
+        "inspection",
+        "in_progress",
+        "completed",
+        "cancelled",
+      ])
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Status booking tidak valid",
+      });
+    }
+
+    // CHECK BOOKING
     const [bookings] = await connection.execute(
       `
       SELECT *
@@ -26,6 +53,7 @@ export const createBookingProgress = async (req, res) => {
 
     const booking = bookings[0];
 
+    // ACCESS VALIDATION
     if (req.user.role === "mechanic" && booking.mechanic_id !== req.user.id) {
       return res.status(403).json({
         success: false,
@@ -33,6 +61,7 @@ export const createBookingProgress = async (req, res) => {
       });
     }
 
+    // INSERT PROGRESS
     const [result] = await connection.execute(
       `
       INSERT INTO booking_progress
@@ -49,9 +78,7 @@ export const createBookingProgress = async (req, res) => {
 
     const progress_id = result.insertId;
 
-    // =========================
-    // SAVE MULTIPLE IMAGES
-    // =========================
+    // SAVE PROGRESS IMAGES
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
         await connection.execute(
@@ -69,42 +96,67 @@ export const createBookingProgress = async (req, res) => {
       }
     }
 
-    // =========================
     // UPDATE BOOKING STATUS
-    // =========================
     await connection.execute(
       `
       UPDATE bookings
-      SET status = ?
+      SET
+        status = ?,
+        updated_at = NOW()
       WHERE id = ?
       `,
       [status, booking_id],
     );
 
+    // UPDATE MECHANIC AVAILABILITY
     if (status === "completed") {
-      await connection.execute(
+      const [activeBookings] = await connection.execute(
         `
-        UPDATE users
-        SET availability = 'available'
-        WHERE id = ?
+        SELECT id
+        FROM bookings
+        WHERE mechanic_id = ?
+        AND status IN (
+          'accepted',
+          'inspection',
+          'in_progress'
+        )
         `,
         [booking.mechanic_id],
       );
+
+      if (activeBookings.length === 0) {
+        await connection.execute(
+          `
+          UPDATE users
+          SET availability = 'available'
+          WHERE id = ?
+          `,
+          [booking.mechanic_id],
+        );
+      }
     }
 
     return res.status(201).json({
       success: true,
       message: "Progress booking berhasil ditambahkan",
+
+      data: {
+        progress_id,
+        booking_id,
+        status,
+      },
     });
   } catch (err) {
     return handleServerError(res, err, "CREATE_BOOKING_PROGRESS_ERROR");
   }
 };
 
+// GET BOOKING PROGRESS BY BOOKING ID
 export const getBookingProgressByBookingId = async (req, res) => {
   try {
     const { bookingId } = req.params;
 
+    // CHECK BOOKING
     const [bookings] = await connection.execute(
       `
       SELECT *
@@ -123,6 +175,7 @@ export const getBookingProgressByBookingId = async (req, res) => {
 
     const booking = bookings[0];
 
+    // ACCESS VALIDATION
     if (req.user.role === "customer" && booking.user_id !== req.user.id) {
       return res.status(403).json({
         success: false,
@@ -137,11 +190,14 @@ export const getBookingProgressByBookingId = async (req, res) => {
       });
     }
 
+    // GET PROGRESS
     const [progress] = await connection.execute(
       `
       SELECT
         booking_progress.*,
+
         users.name AS updated_by_name
+
       FROM booking_progress
 
       JOIN users
@@ -181,6 +237,7 @@ export const getBookingProgressByBookingId = async (req, res) => {
 
     return res.json({
       success: true,
+      total_progress: formattedProgress.length,
       data: formattedProgress,
     });
   } catch (err) {

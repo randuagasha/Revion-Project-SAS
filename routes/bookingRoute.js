@@ -6,6 +6,8 @@ import {
   getMechanicBookings,
   getAllBookings,
   getBookingById,
+  getMechanicIncomingBookings,
+  getMechanicCompletedBookings,
   updateBookingStatus,
   deleteBooking,
 } from "../controllers/bookingController.js";
@@ -35,6 +37,20 @@ router.put(
   authMiddleware,
   roleMiddleware("mechanic", "super_admin"),
   updateBookingStatus,
+);
+
+router.get(
+  "/mechanic/incoming",
+  authMiddleware,
+  roleMiddleware("mechanic"),
+  getMechanicIncomingBookings,
+);
+
+router.get(
+  "/mechanic/completed",
+  authMiddleware,
+  roleMiddleware("mechanic"),
+  getMechanicCompletedBookings,
 );
 
 router.get("/:id", authMiddleware, getBookingById);

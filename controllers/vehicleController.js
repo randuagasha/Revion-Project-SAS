@@ -1,6 +1,7 @@
 import connection from "../database.js";
 
 import { handleServerError } from "../utils/errorHandler.js";
+import { isNotEmpty, isValidYear, isInEnum } from "../utils/validation.js";
 
 export const createVehicle = async (req, res) => {
   try {
@@ -13,6 +14,32 @@ export const createVehicle = async (req, res) => {
       transmission,
       engine_type,
     } = req.body;
+
+    if (
+      !isNotEmpty(brand) ||
+      !isNotEmpty(model) ||
+      !isNotEmpty(year) ||
+      !isNotEmpty(license_plate)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Field wajib belum lengkap",
+      });
+    }
+
+    if (!isValidYear(year)) {
+      return res.status(400).json({
+        success: false,
+        message: "Tahun kendaraan tidak valid",
+      });
+    }
+
+    if (transmission && !isInEnum(transmission, ["manual", "automatic"])) {
+      return res.status(400).json({
+        success: false,
+        message: "Transmission tidak valid",
+      });
+    }
 
     const user_id = req.user.id;
 
@@ -50,6 +77,7 @@ export const createVehicle = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "Vehicle berhasil ditambahkan",
+
       image_url: image
         ? `${req.protocol}://${req.get("host")}/uploads/${image}`
         : null,

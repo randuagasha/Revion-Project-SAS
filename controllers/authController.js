@@ -5,29 +5,47 @@ import connection from "../database.js";
 
 import { handleServerError } from "../utils/errorHandler.js";
 
+import { isValidEmail, isNotEmpty } from "../utils/validation.js";
+
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// =========================
 // REGISTER
-// =========================
 export const register = async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    if (!name || !email || !password) {
+    if (!isNotEmpty(name) || !isNotEmpty(email) || !isNotEmpty(password)) {
       return res.status(400).json({
         success: false,
         message: "Semua field wajib diisi",
       });
     }
 
-    const [existing] = await connection.execute(
-      "SELECT * FROM users WHERE email = ?",
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Format email tidak valid",
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password minimal 6 karakter",
+      });
+    }
+
+    const [existingUsers] = await connection.execute(
+      `
+      SELECT id
+      FROM users
+      WHERE email = ?
+      `,
       [email],
     );
 
-    if (existing.length > 0) {
-      return res.status(400).json({
+    if (existingUsers.length > 0) {
+      return res.status(409).json({
         success: false,
         message: "Email sudah digunakan",
       });
@@ -53,22 +71,31 @@ export const register = async (req, res) => {
   }
 };
 
-// =========================
 // LOGIN
-// =========================
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
+    if (!isNotEmpty(email) || !isNotEmpty(password)) {
       return res.status(400).json({
         success: false,
         message: "Email dan password wajib diisi",
       });
     }
 
+    if (!isValidEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Format email tidak valid",
+      });
+    }
+
     const [users] = await connection.execute(
-      "SELECT * FROM users WHERE email = ?",
+      `
+      SELECT *
+      FROM users
+      WHERE email = ?
+      `,
       [email],
     );
 
@@ -120,9 +147,7 @@ export const login = async (req, res) => {
   }
 };
 
-// =========================
 // ME
-// =========================
 export const me = async (req, res) => {
   try {
     if (!req.user) {
