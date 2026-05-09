@@ -8,8 +8,6 @@ export const createBookingProgress = async (req, res) => {
 
     const updated_by = req.user.id;
 
-    const image = req.file ? req.file.filename : null;
-
     const [bookings] = await connection.execute(
       `
       SELECT *
@@ -26,21 +24,54 @@ export const createBookingProgress = async (req, res) => {
       });
     }
 
-    await connection.execute(
+    const booking = bookings[0];
+
+    if (req.user.role === "mechanic" && booking.mechanic_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Anda tidak memiliki akses ke booking ini",
+      });
+    }
+
+    const [result] = await connection.execute(
       `
       INSERT INTO booking_progress
       (
         booking_id,
         status,
         notes,
-        image,
         updated_by
       )
-      VALUES (?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?)
       `,
-      [booking_id, status, notes, image, updated_by],
+      [booking_id, status, notes, updated_by],
     );
 
+    const progress_id = result.insertId;
+
+    // =========================
+    // SAVE MULTIPLE IMAGES
+    // =========================
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        await connection.execute(
+          `
+          INSERT INTO booking_images
+          (
+            booking_id,
+            progress_id,
+            image
+          )
+          VALUES (?, ?, ?)
+          `,
+          [booking_id, progress_id, file.filename],
+        );
+      }
+    }
+
+    // =========================
+    // UPDATE BOOKING STATUS
+    // =========================
     await connection.execute(
       `
       UPDATE bookings
@@ -50,13 +81,20 @@ export const createBookingProgress = async (req, res) => {
       [status, booking_id],
     );
 
+    if (status === "completed") {
+      await connection.execute(
+        `
+        UPDATE users
+        SET availability = 'available'
+        WHERE id = ?
+        `,
+        [booking.mechanic_id],
+      );
+    }
+
     return res.status(201).json({
       success: true,
       message: "Progress booking berhasil ditambahkan",
-
-      image_url: image
-        ? `${req.protocol}://${req.get("host")}/uploads/${image}`
-        : null,
     });
   } catch (err) {
     return handleServerError(res, err, "CREATE_BOOKING_PROGRESS_ERROR");
@@ -92,27 +130,54 @@ export const getBookingProgressByBookingId = async (req, res) => {
       });
     }
 
+    if (req.user.role === "mechanic" && booking.mechanic_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden",
+      });
+    }
+
     const [progress] = await connection.execute(
       `
       SELECT
         booking_progress.*,
         users.name AS updated_by_name
       FROM booking_progress
+
       JOIN users
       ON booking_progress.updated_by = users.id
+
       WHERE booking_progress.booking_id = ?
+
       ORDER BY booking_progress.created_at ASC
       `,
       [bookingId],
     );
 
-    const formattedProgress = progress.map((item) => ({
-      ...item,
+    const formattedProgress = [];
 
-      image_url: item.image
-        ? `${req.protocol}://${req.get("host")}/uploads/${item.image}`
-        : null,
-    }));
+    for (const item of progress) {
+      const [images] = await connection.execute(
+        `
+        SELECT *
+        FROM booking_images
+        WHERE progress_id = ?
+        `,
+        [item.id],
+      );
+
+      const formattedImages = images.map((img) => ({
+        id: img.id,
+        image: img.image,
+
+        image_url: `${req.protocol}://${req.get("host")}/uploads/${img.image}`,
+      }));
+
+      formattedProgress.push({
+        ...item,
+        images: formattedImages,
+      });
+    }
 
     return res.json({
       success: true,

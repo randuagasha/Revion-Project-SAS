@@ -17,7 +17,7 @@ router.post(
   "/",
   authMiddleware,
   roleMiddleware("mechanic", "super_admin"),
-  upload.single("image"),
+  upload.array("images", 5),
   createBookingProgress,
 );
 
