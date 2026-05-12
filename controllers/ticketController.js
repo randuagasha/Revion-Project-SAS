@@ -2,16 +2,22 @@ import connection from "../database.js";
 
 import { handleServerError } from "../utils/errorHandler.js";
 
-
 export const createTicket = async (req, res) => {
   try {
     const { vehicle_id, subject } = req.body;
 
     const user_id = req.user.id;
 
+    if (!subject) {
+      return res.status(400).json({
+        success: false,
+        message: "Subject wajib diisi",
+      });
+    }
+
     const ticket_code = `TCK-${Date.now()}`;
 
-    await connection.execute(
+    const [result] = await connection.execute(
       `
       INSERT INTO tickets
       (
@@ -28,7 +34,10 @@ export const createTicket = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "Ticket berhasil dibuat",
-      ticket_code,
+      data: {
+        ticket_id: result.insertId,
+        ticket_code,
+      },
     });
   } catch (err) {
     return handleServerError(res, err, "CREATE_TICKET_ERROR");

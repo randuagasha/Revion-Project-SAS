@@ -5,85 +5,43 @@ import { isNotEmpty, isValidYear, isInEnum } from "../utils/validation.js";
 
 export const createVehicle = async (req, res) => {
   try {
-    const {
-      brand,
-      model,
-      year,
-      license_plate,
-      mileage,
-      transmission,
-      engine_type,
-    } = req.body;
-
-    if (
-      !isNotEmpty(brand) ||
-      !isNotEmpty(model) ||
-      !isNotEmpty(year) ||
-      !isNotEmpty(license_plate)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Field wajib belum lengkap",
-      });
-    }
-
-    if (!isValidYear(year)) {
-      return res.status(400).json({
-        success: false,
-        message: "Tahun kendaraan tidak valid",
-      });
-    }
-
-    if (transmission && !isInEnum(transmission, ["manual", "automatic"])) {
-      return res.status(400).json({
-        success: false,
-        message: "Transmission tidak valid",
-      });
-    }
+    const { brand, model, year, license_plate } = req.body;
 
     const user_id = req.user.id;
 
-    const image = req.file ? req.file.filename : null;
+    const image = req.file ? `/uploads/${req.file.filename}` : null;
 
-    await connection.execute(
+    if (!brand || !model || !year || !license_plate) {
+      return res.status(400).json({
+        success: false,
+        message: "Brand, model, year, dan license plate wajib diisi",
+      });
+    }
+
+    const [result] = await connection.execute(
       `
-      INSERT INTO vehicles
-      (
-        user_id,
-        brand,
-        model,
-        year,
-        license_plate,
-        mileage,
-        transmission,
-        engine_type,
-        image
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO vehicles 
+      (user_id, brand, model, year, license_plate, image)
+      VALUES (?, ?, ?, ?, ?, ?)
       `,
-      [
-        user_id,
-        brand,
-        model,
-        year,
-        license_plate,
-        mileage,
-        transmission,
-        engine_type,
-        image,
-      ],
+      [user_id, brand, model, year, license_plate, image],
     );
 
     return res.status(201).json({
       success: true,
-      message: "Vehicle berhasil ditambahkan",
-
-      image_url: image
-        ? `${req.protocol}://${req.get("host")}/uploads/${image}`
-        : null,
+      message: "Vehicle berhasil dibuat",
+      data: {
+        id: result.insertId,
+        user_id,
+        brand,
+        model,
+        year,
+        license_plate,
+        image,
+      },
     });
-  } catch (err) {
-    return handleServerError(res, err, "CREATE_VEHICLE_ERROR");
+  } catch (error) {
+    return handleServerError(res, error);
   }
 };
 
@@ -101,17 +59,9 @@ export const getMyVehicles = async (req, res) => {
       [user_id],
     );
 
-    const formattedVehicles = vehicles.map((vehicle) => ({
-      ...vehicle,
-
-      image_url: vehicle.image
-        ? `${req.protocol}://${req.get("host")}/uploads/${vehicle.image}`
-        : null,
-    }));
-
     return res.json({
       success: true,
-      data: formattedVehicles,
+      data: vehicles,
     });
   } catch (err) {
     return handleServerError(res, err, "GET_MY_VEHICLES_ERROR");
@@ -149,14 +99,7 @@ export const getVehicleById = async (req, res) => {
 
     return res.json({
       success: true,
-
-      data: {
-        ...vehicle,
-
-        image_url: vehicle.image
-          ? `${req.protocol}://${req.get("host")}/uploads/${vehicle.image}`
-          : null,
-      },
+      data: vehicle,
     });
   } catch (err) {
     return handleServerError(res, err, "GET_VEHICLE_BY_ID_ERROR");
@@ -202,7 +145,14 @@ export const updateVehicle = async (req, res) => {
       });
     }
 
-    const image = req.file ? req.file.filename : vehicle.image;
+    if (!brand || !model || !year || !license_plate) {
+      return res.status(400).json({
+        success: false,
+        message: "Brand, model, year, dan license plate wajib diisi",
+      });
+    }
+
+    const image = req.file ? `/uploads/${req.file.filename}` : vehicle.image;
 
     await connection.execute(
       `
@@ -223,21 +173,31 @@ export const updateVehicle = async (req, res) => {
         model,
         year,
         license_plate,
-        mileage,
-        transmission,
-        engine_type,
+        mileage !== undefined && mileage !== "" ? mileage : vehicle.mileage,
+        transmission !== undefined && transmission !== ""
+          ? transmission
+          : vehicle.transmission,
+        engine_type !== undefined && engine_type !== ""
+          ? engine_type
+          : vehicle.engine_type,
         image,
         id,
       ],
     );
 
+    const [updatedVehicles] = await connection.execute(
+      `
+      SELECT *
+      FROM vehicles
+      WHERE id = ?
+      `,
+      [id],
+    );
+
     return res.json({
       success: true,
       message: "Vehicle berhasil diupdate",
-
-      image_url: image
-        ? `${req.protocol}://${req.get("host")}/uploads/${image}`
-        : null,
+      data: updatedVehicles[0],
     });
   } catch (err) {
     return handleServerError(res, err, "UPDATE_VEHICLE_ERROR");
