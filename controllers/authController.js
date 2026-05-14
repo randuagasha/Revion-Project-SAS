@@ -83,34 +83,30 @@ export const login = async (req, res) => {
       });
     }
 
-    if (!isValidEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        message: "Format email tidak valid",
-      });
-    }
+    const normalizedEmail = String(email).trim().toLowerCase();
 
     const [users] = await connection.execute(
       `
       SELECT *
       FROM users
-      WHERE email = ?
+      WHERE LOWER(TRIM(email)) = ?
+      LIMIT 1
       `,
-      [email],
+      [normalizedEmail],
     );
 
     if (users.length === 0) {
-      return res.status(404).json({
+      return res.status(401).json({
         success: false,
-        message: "User tidak ditemukan",
+        message: "Email tidak ditemukan",
       });
     }
 
     const user = users[0];
 
-    const isMatch = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(password, user.password);
 
-    if (!isMatch) {
+    if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
         message: "Password salah",
@@ -120,6 +116,7 @@ export const login = async (req, res) => {
     const token = jwt.sign(
       {
         id: user.id,
+        name: user.name,
         email: user.email,
         role: user.role,
       },
@@ -132,9 +129,7 @@ export const login = async (req, res) => {
     return res.json({
       success: true,
       message: "Login berhasil",
-
       token,
-
       user: {
         id: user.id,
         name: user.name,
@@ -142,8 +137,14 @@ export const login = async (req, res) => {
         role: user.role,
       },
     });
-  } catch (err) {
-    return handleServerError(res, err, "LOGIN_ERROR");
+  } catch (error) {
+    console.error("LOGIN_ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error login",
+      error: error.message,
+    });
   }
 };
 

@@ -6,25 +6,51 @@ import { handleServerError } from "../utils/errorHandler.js";
 
 export const createUser = async (req, res) => {
   try {
-    const { name, email, password, phone, role } = req.body;
+    const { name, email, password, role, availability } = req.body;
 
-    const [existing] = await connection.execute(
+    if (!name || !email || !password || !role) {
+      return res.status(400).json({
+        success: false,
+        message: "Name, email, password, dan role wajib diisi",
+      });
+    }
+
+    const allowedRoles = ["customer", "mechanic", "super_admin"];
+
+    if (!allowedRoles.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: "Role tidak valid",
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password minimal 6 karakter",
+      });
+    }
+
+    const [existingUsers] = await connection.execute(
       `
-      SELECT *
+      SELECT id
       FROM users
       WHERE email = ?
       `,
       [email],
     );
 
-    if (existing.length > 0) {
-      return res.status(400).json({
+    if (existingUsers.length > 0) {
+      return res.status(409).json({
         success: false,
         message: "Email sudah digunakan",
       });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+
+    const userAvailability =
+      role === "mechanic" ? availability || "available" : null;
 
     await connection.execute(
       `
@@ -33,12 +59,12 @@ export const createUser = async (req, res) => {
         name,
         email,
         password,
-        phone,
-        role
+        role,
+        availability
       )
       VALUES (?, ?, ?, ?, ?)
       `,
-      [name, email, hashedPassword, phone, role],
+      [name, email, hashedPassword, role, userAvailability],
     );
 
     return res.status(201).json({
@@ -46,32 +72,72 @@ export const createUser = async (req, res) => {
       message: "User berhasil dibuat",
     });
   } catch (err) {
-    return handleServerError(res, err, "CREATE_USER_ERROR");
+    console.error("CREATE_ADMIN_USER_ERROR:", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Gagal membuat user",
+      error: err.message,
+    });
   }
 };
 
 export const getAllUsers = async (req, res) => {
   try {
-    const [users] = await connection.execute(
-      `
+    const { role, search } = req.query;
+
+    let query = `
       SELECT
         id,
         name,
         email,
-        phone,
         role,
-        created_at
+        availability,
+        created_at,
+        updated_at
       FROM users
-      ORDER BY created_at DESC
-      `,
-    );
+      WHERE 1=1
+    `;
+
+    const values = [];
+
+    if (role) {
+      query += ` AND role = ? `;
+      values.push(role);
+    }
+
+    if (search) {
+      query += `
+        AND (
+          name LIKE ?
+          OR email LIKE ?
+          OR role LIKE ?
+          OR availability LIKE ?
+        )
+      `;
+
+      const keyword = `%${search}%`;
+
+      values.push(keyword, keyword, keyword, keyword);
+    }
+
+    query += ` ORDER BY created_at DESC `;
+
+    const [users] = await connection.execute(query, values);
 
     return res.json({
       success: true,
+      total: users.length,
       data: users,
     });
   } catch (err) {
-    return handleServerError(res, err, "GET_ALL_USERS_ERROR");
+    console.error("GET_ALL_USERS_ERROR:", err);
+
+    return res.status(500).json({
+      success: false,
+      message: "Gagal mengambil data user",
+      error: err.message,
+    });
   }
 };
 

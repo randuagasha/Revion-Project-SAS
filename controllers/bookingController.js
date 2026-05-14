@@ -3,6 +3,36 @@ import connection from "../database.js";
 import { handleServerError } from "../utils/errorHandler.js";
 import { isNotEmpty, isInEnum } from "../utils/validation.js";
 
+import {
+  createNotification,
+  createBulkNotifications,
+} from "../utils/notificationHelper.js";
+
+const bookingStatusList = [
+  "pending",
+  "accepted",
+  "inspection",
+  "in_progress",
+  "completed",
+  "cancelled",
+];
+
+const formatStatusText = (status) => {
+  return String(status || "").replace("_", " ");
+};
+
+const getSuperAdmins = async () => {
+  const [superAdmins] = await connection.execute(
+    `
+    SELECT id
+    FROM users
+    WHERE role = 'super_admin'
+    `,
+  );
+
+  return superAdmins;
+};
+
 // CREATE BOOKING
 export const createBooking = async (req, res) => {
   try {
@@ -56,6 +86,8 @@ export const createBooking = async (req, res) => {
       });
     }
 
+    const vehicle = vehicles[0];
+
     // CHECK SERVICE
     const [services] = await connection.execute(
       `
@@ -73,56 +105,11 @@ export const createBooking = async (req, res) => {
       });
     }
 
+    const service = services[0];
+
     const booking_code = `RVN-${Date.now()}`;
 
-    // AUTO ASSIGN MECHANIC
-    const [mechanics] = await connection.execute(`
-      SELECT
-        users.id,
-        users.name,
-
-        COUNT(bookings.id) AS active_jobs
-
-      FROM users
-
-      LEFT JOIN bookings
-        ON users.id = bookings.mechanic_id
-        AND bookings.status IN (
-          'accepted',
-          'inspection',
-          'in_progress'
-        )
-
-      WHERE users.role = 'mechanic'
-      AND users.availability = 'available'
-
-      GROUP BY users.id
-
-      ORDER BY active_jobs ASC
-
-      LIMIT 1
-    `);
-
-    if (mechanics.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Tidak ada mechanic available",
-      });
-    }
-
-    const selectedMechanic = mechanics[0];
-
-    // SET MECHANIC BUSY
-    await connection.execute(
-      `
-      UPDATE users
-      SET availability = 'busy'
-      WHERE id = ?
-      `,
-      [selectedMechanic.id],
-    );
-
-    // INSERT BOOKING
+    // INSERT BOOKING AS PENDING
     const [result] = await connection.execute(
       `
       INSERT INTO bookings
@@ -145,12 +132,12 @@ export const createBooking = async (req, res) => {
         user_id,
         vehicle_id,
         service_id,
-        selectedMechanic.id,
+        null,
         preferred_date,
         preferred_time,
         complaint,
         priority || "medium",
-        "accepted",
+        "pending",
       ],
     );
 
@@ -173,20 +160,50 @@ export const createBooking = async (req, res) => {
       }
     }
 
+    // NOTIFY AVAILABLE MECHANICS
+    const [mechanics] = await connection.execute(
+      `
+      SELECT id
+      FROM users
+      WHERE role = 'mechanic'
+      AND availability = 'available'
+      `,
+    );
+
+    await createBulkNotifications(
+      mechanics.map((mechanic) => ({
+        user_id: mechanic.id,
+        title: "New Booking Request",
+        message: `A customer submitted a new ${service.name} booking request for ${vehicle.brand} ${vehicle.model}.`,
+        type: "booking",
+        reference_id: booking_id,
+        reference_url: "/mechanics/bookings",
+      })),
+    );
+
+    // NOTIFY SUPER ADMINS
+    const superAdmins = await getSuperAdmins();
+
+    await createBulkNotifications(
+      superAdmins.map((admin) => ({
+        user_id: admin.id,
+        title: "New Customer Booking",
+        message: `New booking ${booking_code} has been submitted by a customer.`,
+        type: "booking",
+        reference_id: booking_id,
+        reference_url: `/super_admin/bookings/${booking_id}`,
+      })),
+    );
+
     return res.status(201).json({
       success: true,
-      message: "Booking berhasil dibuat",
+      message: "Booking berhasil dibuat dan menunggu mechanic menerima",
 
       data: {
         booking_id,
         booking_code,
-
-        assigned_mechanic: {
-          id: selectedMechanic.id,
-          name: selectedMechanic.name,
-        },
-
-        status: "accepted",
+        assigned_mechanic: null,
+        status: "pending",
       },
     });
   } catch (err) {
@@ -335,8 +352,10 @@ export const getMechanicBookings = async (req, res) => {
 // GET ALL BOOKINGS
 export const getAllBookings = async (req, res) => {
   try {
-    const { search = "", status, priority, page = 1, limit = 10 } = req.query;
+    const { search = "", status, priority } = req.query;
 
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const limit = Math.max(parseInt(req.query.limit || "10", 10), 1);
     const offset = (page - 1) * limit;
 
     let query = `
@@ -348,8 +367,10 @@ export const getAllBookings = async (req, res) => {
 
         vehicles.brand,
         vehicles.model,
+        vehicles.license_plate,
 
         services.name AS service_name,
+        services.price,
 
         mechanics.name AS mechanic_name
 
@@ -372,44 +393,52 @@ export const getAllBookings = async (req, res) => {
 
     const values = [];
 
-    // SEARCH
     if (search) {
       query += `
         AND (
           bookings.booking_code LIKE ?
           OR users.name LIKE ?
+          OR users.email LIKE ?
           OR vehicles.brand LIKE ?
           OR vehicles.model LIKE ?
+          OR vehicles.license_plate LIKE ?
+          OR services.name LIKE ?
+          OR mechanics.name LIKE ?
         )
       `;
 
-      values.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+      const keyword = `%${search}%`;
+
+      values.push(
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+      );
     }
 
-    // FILTER STATUS
     if (status) {
       query += ` AND bookings.status = ? `;
       values.push(status);
     }
 
-    // FILTER PRIORITY
     if (priority) {
       query += ` AND bookings.priority = ? `;
       values.push(priority);
     }
 
-    // ORDER + PAGINATION
     query += `
       ORDER BY bookings.created_at DESC
-      LIMIT ?
-      OFFSET ?
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
-
-    values.push(Number(limit), Number(offset));
 
     const [bookings] = await connection.execute(query, values);
 
-    // TOTAL DATA
     let totalQuery = `
       SELECT COUNT(*) AS total
 
@@ -421,6 +450,12 @@ export const getAllBookings = async (req, res) => {
       JOIN vehicles
         ON bookings.vehicle_id = vehicles.id
 
+      JOIN services
+        ON bookings.service_id = services.id
+
+      LEFT JOIN users AS mechanics
+        ON bookings.mechanic_id = mechanics.id
+
       WHERE 1=1
     `;
 
@@ -431,16 +466,26 @@ export const getAllBookings = async (req, res) => {
         AND (
           bookings.booking_code LIKE ?
           OR users.name LIKE ?
+          OR users.email LIKE ?
           OR vehicles.brand LIKE ?
           OR vehicles.model LIKE ?
+          OR vehicles.license_plate LIKE ?
+          OR services.name LIKE ?
+          OR mechanics.name LIKE ?
         )
       `;
 
+      const keyword = `%${search}%`;
+
       totalValues.push(
-        `%${search}%`,
-        `%${search}%`,
-        `%${search}%`,
-        `%${search}%`,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
+        keyword,
       );
     }
 
@@ -458,10 +503,11 @@ export const getAllBookings = async (req, res) => {
 
     return res.json({
       success: true,
+      total: totalData.total,
 
       pagination: {
-        current_page: Number(page),
-        limit: Number(limit),
+        current_page: page,
+        limit,
         total_data: totalData.total,
         total_page: Math.ceil(totalData.total / limit),
       },
@@ -530,11 +576,17 @@ export const getBookingById = async (req, res) => {
       });
     }
 
-    if (req.user.role === "mechanic" && booking.mechanic_id !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: "Forbidden",
-      });
+    if (req.user.role === "mechanic") {
+      const isAssignedToMechanic = booking.mechanic_id === req.user.id;
+      const isPendingUnassigned =
+        booking.status === "pending" && booking.mechanic_id === null;
+
+      if (!isAssignedToMechanic && !isPendingUnassigned) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden",
+        });
+      }
     }
 
     const [images] = await connection.execute(
@@ -571,8 +623,50 @@ export const getBookingById = async (req, res) => {
 export const updateBookingStatus = async (req, res) => {
   try {
     const { id } = req.params;
-
     const { status } = req.body;
+
+    if (!status || !bookingStatusList.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Status booking tidak valid",
+      });
+    }
+
+    const [bookings] = await connection.execute(
+      `
+      SELECT
+        bookings.*,
+        services.name AS service_name
+      FROM bookings
+      JOIN services
+        ON bookings.service_id = services.id
+      WHERE bookings.id = ?
+      `,
+      [id],
+    );
+
+    if (bookings.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking tidak ditemukan",
+      });
+    }
+
+    const booking = bookings[0];
+
+    if (req.user.role === "customer") {
+      return res.status(403).json({
+        success: false,
+        message: "Customer tidak dapat mengubah status booking",
+      });
+    }
+
+    if (req.user.role === "mechanic" && booking.mechanic_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Mechanic hanya dapat mengubah booking miliknya",
+      });
+    }
 
     await connection.execute(
       `
@@ -581,6 +675,65 @@ export const updateBookingStatus = async (req, res) => {
       WHERE id = ?
       `,
       [status, id],
+    );
+
+    if (
+      (status === "completed" || status === "cancelled") &&
+      booking.mechanic_id
+    ) {
+      await connection.execute(
+        `
+        UPDATE users
+        SET availability = 'available'
+        WHERE id = ?
+        AND role = 'mechanic'
+        `,
+        [booking.mechanic_id],
+      );
+    }
+
+    const statusText = formatStatusText(status);
+
+    // NOTIFY CUSTOMER
+    await createNotification({
+      user_id: booking.user_id,
+      title: "Booking Status Updated",
+      message: `Your booking ${booking.booking_code} status has been updated to ${statusText}.`,
+      type: "booking_status",
+      reference_id: booking.id,
+      reference_url: `/customers/bookings/${booking.id}`,
+    });
+
+    // NOTIFY MECHANIC IF STATUS UPDATED BY SUPER ADMIN
+    if (
+      req.user.role === "super_admin" &&
+      booking.mechanic_id &&
+      booking.mechanic_id !== req.user.id
+    ) {
+      await createNotification({
+        user_id: booking.mechanic_id,
+        title: "Booking Status Updated",
+        message: `Booking ${booking.booking_code} status has been updated to ${statusText}.`,
+        type: "booking_status",
+        reference_id: booking.id,
+        reference_url: `/mechanics/bookings/${booking.id}`,
+      });
+    }
+
+    // NOTIFY SUPER ADMINS
+    const superAdmins = await getSuperAdmins();
+
+    await createBulkNotifications(
+      superAdmins
+        .filter((admin) => admin.id !== req.user.id)
+        .map((admin) => ({
+          user_id: admin.id,
+          title: "Booking Status Updated",
+          message: `Booking ${booking.booking_code} status changed to ${statusText}.`,
+          type: "booking_status",
+          reference_id: booking.id,
+          reference_url: `/super_admin/bookings/${booking.id}`,
+        })),
     );
 
     return res.json({
@@ -597,6 +750,24 @@ export const deleteBooking = async (req, res) => {
   try {
     const { id } = req.params;
 
+    const [bookings] = await connection.execute(
+      `
+      SELECT *
+      FROM bookings
+      WHERE id = ?
+      `,
+      [id],
+    );
+
+    if (bookings.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking tidak ditemukan",
+      });
+    }
+
+    const booking = bookings[0];
+
     await connection.execute(
       `
       DELETE FROM bookings
@@ -604,6 +775,27 @@ export const deleteBooking = async (req, res) => {
       `,
       [id],
     );
+
+    if (booking.mechanic_id) {
+      await connection.execute(
+        `
+        UPDATE users
+        SET availability = 'available'
+        WHERE id = ?
+        AND role = 'mechanic'
+        `,
+        [booking.mechanic_id],
+      );
+    }
+
+    await createNotification({
+      user_id: booking.user_id,
+      title: "Booking Deleted",
+      message: `Your booking ${booking.booking_code} has been deleted by admin.`,
+      type: "booking",
+      reference_id: booking.id,
+      reference_url: "/customers/bookings",
+    });
 
     return res.json({
       success: true,
@@ -619,9 +811,8 @@ export const getMechanicIncomingBookings = async (req, res) => {
   try {
     const mechanic_id = req.user.id;
 
-    const { search } = req.query;
-
-    let query = `
+    const [bookings] = await connection.execute(
+      `
       SELECT
         bookings.*,
 
@@ -632,7 +823,8 @@ export const getMechanicIncomingBookings = async (req, res) => {
         vehicles.model,
         vehicles.license_plate,
 
-        services.name AS service_name
+        services.name AS service_name,
+        services.price
 
       FROM bookings
 
@@ -645,34 +837,21 @@ export const getMechanicIncomingBookings = async (req, res) => {
       JOIN services
         ON bookings.service_id = services.id
 
-      WHERE bookings.mechanic_id = ?
-      AND bookings.status IN (
-        'accepted',
-        'inspection',
-        'in_progress'
-      )
-    `;
-
-    const values = [mechanic_id];
-
-    if (search) {
-      query += `
-        AND (
-          bookings.booking_code LIKE ?
-          OR users.name LIKE ?
-          OR vehicles.brand LIKE ?
-          OR vehicles.model LIKE ?
+      WHERE
+        (
+          bookings.status = 'pending'
+          AND bookings.mechanic_id IS NULL
         )
-      `;
+        OR
+        (
+          bookings.mechanic_id = ?
+          AND bookings.status IN ('accepted', 'inspection', 'in_progress')
+        )
 
-      const keyword = `%${search}%`;
-
-      values.push(keyword, keyword, keyword, keyword);
-    }
-
-    query += ` ORDER BY bookings.created_at DESC `;
-
-    const [bookings] = await connection.execute(query, values);
+      ORDER BY bookings.created_at DESC
+      `,
+      [mechanic_id],
+    );
 
     return res.json({
       success: true,
@@ -747,5 +926,122 @@ export const getMechanicCompletedBookings = async (req, res) => {
     });
   } catch (err) {
     return handleServerError(res, err, "GET_MECHANIC_COMPLETED_BOOKINGS_ERROR");
+  }
+};
+
+// ACCEPT BOOKING BY MECHANIC
+export const acceptBookingByMechanic = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const mechanic_id = req.user.id;
+
+    const [mechanics] = await connection.execute(
+      `
+      SELECT id, role, availability, name
+      FROM users
+      WHERE id = ?
+      AND role = 'mechanic'
+      `,
+      [mechanic_id],
+    );
+
+    if (mechanics.length === 0) {
+      return res.status(403).json({
+        success: false,
+        message: "Hanya mechanic yang dapat menerima booking",
+      });
+    }
+
+    const mechanic = mechanics[0];
+
+    if (mechanic.availability === "offline") {
+      return res.status(400).json({
+        success: false,
+        message: "Mechanic sedang offline",
+      });
+    }
+
+    const [bookings] = await connection.execute(
+      `
+      SELECT *
+      FROM bookings
+      WHERE id = ?
+      `,
+      [id],
+    );
+
+    if (bookings.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking tidak ditemukan",
+      });
+    }
+
+    const booking = bookings[0];
+
+    if (booking.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Booking sudah tidak berstatus pending",
+      });
+    }
+
+    if (booking.mechanic_id !== null) {
+      return res.status(400).json({
+        success: false,
+        message: "Booking sudah diterima mechanic lain",
+      });
+    }
+
+    await connection.execute(
+      `
+      UPDATE bookings
+      SET
+        mechanic_id = ?,
+        status = 'accepted'
+      WHERE id = ?
+      `,
+      [mechanic_id, id],
+    );
+
+    await connection.execute(
+      `
+      UPDATE users
+      SET availability = 'busy'
+      WHERE id = ?
+      `,
+      [mechanic_id],
+    );
+
+    // NOTIFY CUSTOMER
+    await createNotification({
+      user_id: booking.user_id,
+      title: "Booking Accepted",
+      message: `Your booking ${booking.booking_code} has been accepted by ${mechanic.name}.`,
+      type: "booking_status",
+      reference_id: booking.id,
+      reference_url: `/customers/bookings/${booking.id}`,
+    });
+
+    // NOTIFY SUPER ADMINS
+    const superAdmins = await getSuperAdmins();
+
+    await createBulkNotifications(
+      superAdmins.map((admin) => ({
+        user_id: admin.id,
+        title: "Booking Accepted by Mechanic",
+        message: `Booking ${booking.booking_code} has been accepted by ${mechanic.name}.`,
+        type: "booking_status",
+        reference_id: booking.id,
+        reference_url: `/super_admin/bookings/${booking.id}`,
+      })),
+    );
+
+    return res.json({
+      success: true,
+      message: "Booking berhasil diterima",
+    });
+  } catch (err) {
+    return handleServerError(res, err, "ACCEPT_BOOKING_BY_MECHANIC_ERROR");
   }
 };

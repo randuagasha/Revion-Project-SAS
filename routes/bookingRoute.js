@@ -10,6 +10,7 @@ import {
   getMechanicCompletedBookings,
   updateBookingStatus,
   deleteBooking,
+  acceptBookingByMechanic,
 } from "../controllers/bookingController.js";
 
 import { authMiddleware } from "../middlewares/authMiddleware.js";
@@ -25,21 +26,6 @@ router.post("/", authMiddleware, upload.array("images", 5), createBooking);
 router.get("/my", authMiddleware, getMyBookings);
 
 router.get(
-  "/mechanic",
-  authMiddleware,
-  roleMiddleware("mechanic"),
-  getMechanicBookings,
-);
-router.get("/", authMiddleware, roleMiddleware("super_admin"), getAllBookings);
-
-router.put(
-  "/:id/status",
-  authMiddleware,
-  roleMiddleware("mechanic", "super_admin"),
-  updateBookingStatus,
-);
-
-router.get(
   "/mechanic/incoming",
   authMiddleware,
   roleMiddleware("mechanic"),
@@ -53,7 +39,23 @@ router.get(
   getMechanicCompletedBookings,
 );
 
-router.get("/:id", authMiddleware, getBookingById);
+router.get(
+  "/mechanic",
+  authMiddleware,
+  roleMiddleware("mechanic"),
+  getMechanicBookings,
+);
+
+router.get("/", authMiddleware, roleMiddleware("super_admin"), getAllBookings);
+
+router.put(
+  "/:id/accept",
+  authMiddleware,
+  roleMiddleware("mechanic"),
+  acceptBookingByMechanic,
+);
+
+router.put("/:id/status", authMiddleware, updateBookingStatus);
 
 router.delete(
   "/:id",
@@ -61,5 +63,7 @@ router.delete(
   roleMiddleware("super_admin"),
   deleteBooking,
 );
+
+router.get("/:id", authMiddleware, getBookingById);
 
 export default router;
