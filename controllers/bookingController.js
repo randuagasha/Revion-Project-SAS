@@ -33,6 +33,53 @@ const getSuperAdmins = async () => {
   return superAdmins;
 };
 
+const activeBookingStatusList = ["accepted", "inspection", "in_progress"];
+
+const getMechanicActiveBooking = async (mechanicId) => {
+  const [bookings] = await connection.execute(
+    `
+    SELECT id, booking_code, status
+    FROM bookings
+    WHERE mechanic_id = ?
+    AND status IN ('accepted', 'inspection', 'in_progress')
+    LIMIT 1
+    `,
+    [mechanicId],
+  );
+
+  return bookings[0] || null;
+};
+
+const syncMechanicAvailabilityAfterBookingDone = async (mechanicId) => {
+  const activeBooking = await getMechanicActiveBooking(mechanicId);
+
+  if (activeBooking) {
+    await connection.execute(
+      `
+      UPDATE users
+      SET availability = 'busy'
+      WHERE id = ?
+      AND role = 'mechanic'
+      `,
+      [mechanicId],
+    );
+
+    return "busy";
+  }
+
+  await connection.execute(
+    `
+    UPDATE users
+    SET availability = 'available'
+    WHERE id = ?
+    AND role = 'mechanic'
+    `,
+    [mechanicId],
+  );
+
+  return "available";
+};
+
 // CREATE BOOKING
 export const createBooking = async (req, res) => {
   try {
@@ -681,15 +728,7 @@ export const updateBookingStatus = async (req, res) => {
       (status === "completed" || status === "cancelled") &&
       booking.mechanic_id
     ) {
-      await connection.execute(
-        `
-        UPDATE users
-        SET availability = 'available'
-        WHERE id = ?
-        AND role = 'mechanic'
-        `,
-        [booking.mechanic_id],
-      );
+      await syncMechanicAvailabilityAfterBookingDone(booking.mechanic_id);
     }
 
     const statusText = formatStatusText(status);
@@ -777,17 +816,8 @@ export const deleteBooking = async (req, res) => {
     );
 
     if (booking.mechanic_id) {
-      await connection.execute(
-        `
-        UPDATE users
-        SET availability = 'available'
-        WHERE id = ?
-        AND role = 'mechanic'
-        `,
-        [booking.mechanic_id],
-      );
+      await syncMechanicAvailabilityAfterBookingDone(booking.mechanic_id);
     }
-
     await createNotification({
       user_id: booking.user_id,
       title: "Booking Deleted",
@@ -954,10 +984,33 @@ export const acceptBookingByMechanic = async (req, res) => {
 
     const mechanic = mechanics[0];
 
-    if (mechanic.availability === "offline") {
+    if (mechanic.availability !== "available") {
       return res.status(400).json({
         success: false,
-        message: "Mechanic sedang offline",
+        message:
+          mechanic.availability === "busy"
+            ? "Mechanic sedang menangani booking lain"
+            : "Mechanic sedang off duty",
+      });
+    }
+
+    const activeBooking = await getMechanicActiveBooking(mechanic_id);
+
+    if (activeBooking) {
+      await connection.execute(
+        `
+    UPDATE users
+    SET availability = 'busy'
+    WHERE id = ?
+    AND role = 'mechanic'
+    `,
+        [mechanic_id],
+      );
+
+      return res.status(400).json({
+        success: false,
+        message: "Mechanic hanya bisa menangani 1 booking aktif",
+        active_booking: activeBooking,
       });
     }
 

@@ -2,6 +2,23 @@ import connection from "../database.js";
 
 import { handleServerError } from "../utils/errorHandler.js";
 
+const activeBookingStatusList = ["accepted", "inspection", "in_progress"];
+
+const getMechanicActiveBooking = async (mechanicId) => {
+  const [bookings] = await connection.execute(
+    `
+    SELECT id, booking_code, status
+    FROM bookings
+    WHERE mechanic_id = ?
+    AND status IN ('accepted', 'inspection', 'in_progress')
+    LIMIT 1
+    `,
+    [mechanicId],
+  );
+
+  return bookings[0] || null;
+};
+
 export const getProfile = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -13,6 +30,7 @@ export const getProfile = async (req, res) => {
         name,
         email,
         role,
+        availability,
         profile_image
       FROM users
       WHERE id = ?
@@ -95,5 +113,66 @@ export const updateProfile = async (req, res) => {
     });
   } catch (err) {
     return handleServerError(res, err, "UPDATE_PROFILE_ERROR");
+  }
+};
+
+export const updateMechanicAvailability = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { availability } = req.body;
+
+    if (req.user.role !== "mechanic") {
+      return res.status(403).json({
+        success: false,
+        message: "Hanya mechanic yang dapat mengubah status availability",
+      });
+    }
+
+    if (!["available", "off_duty"].includes(availability)) {
+      return res.status(400).json({
+        success: false,
+        message: "Availability hanya bisa diubah ke available atau off_duty",
+      });
+    }
+
+    const activeBooking = await getMechanicActiveBooking(userId);
+
+    if (activeBooking) {
+      await connection.execute(
+        `
+        UPDATE users
+        SET availability = 'busy'
+        WHERE id = ?
+        `,
+        [userId],
+      );
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Tidak bisa mengubah status karena masih ada booking aktif. Selesaikan booking terlebih dahulu.",
+        active_booking: activeBooking,
+      });
+    }
+
+    await connection.execute(
+      `
+      UPDATE users
+      SET availability = ?
+      WHERE id = ?
+      AND role = 'mechanic'
+      `,
+      [availability, userId],
+    );
+
+    return res.json({
+      success: true,
+      message: `Availability berhasil diubah ke ${availability}`,
+      data: {
+        availability,
+      },
+    });
+  } catch (err) {
+    return handleServerError(res, err, "UPDATE_MECHANIC_AVAILABILITY_ERROR");
   }
 };

@@ -9,6 +9,59 @@ import { isValidEmail, isNotEmpty } from "../utils/validation.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
+const activeBookingStatusList = ["accepted", "inspection", "in_progress"];
+
+const getMechanicActiveBooking = async (mechanicId) => {
+  const [bookings] = await connection.execute(
+    `
+    SELECT id
+    FROM bookings
+    WHERE mechanic_id = ?
+    AND status IN ('accepted', 'inspection', 'in_progress')
+    LIMIT 1
+    `,
+    [mechanicId],
+  );
+
+  return bookings[0] || null;
+};
+
+const syncMechanicAvailabilityOnLogin = async (user) => {
+  if (user.role !== "mechanic") {
+    return user.availability;
+  }
+
+  const activeBooking = await getMechanicActiveBooking(user.id);
+
+  if (activeBooking) {
+    await connection.execute(
+      `
+      UPDATE users
+      SET availability = 'busy'
+      WHERE id = ?
+      `,
+      [user.id],
+    );
+
+    return "busy";
+  }
+
+  if (user.availability === "off_duty") {
+    return "off_duty";
+  }
+
+  await connection.execute(
+    `
+    UPDATE users
+    SET availability = 'available'
+    WHERE id = ?
+    `,
+    [user.id],
+  );
+
+  return "available";
+};
+
 // REGISTER
 export const register = async (req, res) => {
   try {
@@ -35,13 +88,15 @@ export const register = async (req, res) => {
       });
     }
 
+    const normalizedEmail = String(email).trim().toLowerCase();
+
     const [existingUsers] = await connection.execute(
       `
       SELECT id
       FROM users
-      WHERE email = ?
+      WHERE LOWER(TRIM(email)) = ?
       `,
-      [email],
+      [normalizedEmail],
     );
 
     if (existingUsers.length > 0) {
@@ -59,7 +114,7 @@ export const register = async (req, res) => {
       (name, email, password, role)
       VALUES (?, ?, ?, ?)
       `,
-      [name, email, hashedPassword, "customer"],
+      [name, normalizedEmail, hashedPassword, "customer"],
     );
 
     return res.status(201).json({
@@ -113,6 +168,8 @@ export const login = async (req, res) => {
       });
     }
 
+    const availability = await syncMechanicAvailabilityOnLogin(user);
+
     const token = jwt.sign(
       {
         id: user.id,
@@ -135,6 +192,7 @@ export const login = async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        availability,
       },
     });
   } catch (error) {
@@ -166,7 +224,8 @@ export const me = async (req, res) => {
         id,
         name,
         email,
-        role
+        role,
+        availability
       FROM users
       WHERE id = ?
       `,
@@ -186,5 +245,33 @@ export const me = async (req, res) => {
     });
   } catch (err) {
     return handleServerError(res, err, "ME_ERROR");
+  }
+};
+
+// LOGOUT
+export const logout = async (req, res) => {
+  try {
+    if (req.user.role === "mechanic") {
+      const activeBooking = await getMechanicActiveBooking(req.user.id);
+
+      if (!activeBooking) {
+        await connection.execute(
+          `
+          UPDATE users
+          SET availability = 'off_duty'
+          WHERE id = ?
+          AND role = 'mechanic'
+          `,
+          [req.user.id],
+        );
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "Logout berhasil",
+    });
+  } catch (err) {
+    return handleServerError(res, err, "LOGOUT_ERROR");
   }
 };
