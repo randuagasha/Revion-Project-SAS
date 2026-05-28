@@ -12,6 +12,7 @@ import ticketMessageRoute from "./routes/ticketMessageRoute.js";
 import dashboardRoute from "./routes/dashboardRoute.js";
 import bookingProgressRoute from "./routes/bookingProgressRoute.js";
 import notificationRoute from "./routes/notificationRoute.js";
+import revbotRoute from "./routes/revbotRoute.js";
 
 import connection from "./database.js";
 
@@ -41,6 +42,7 @@ app.use("/api/tickets", ticketRoute);
 app.use("/api/ticket-messages", ticketMessageRoute);
 app.use("/api/dashboard", dashboardRoute);
 app.use("/api/notifications", notificationRoute);
+app.use("/api/revbot", revbotRoute);
 
 app.get("/", async (req, res) => {
   try {
