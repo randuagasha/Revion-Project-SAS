@@ -1,0 +1,15 @@
+# Environment
+.env
+.env.local
+.env.*
+
+# Node Modules
+node_modules/
+
+# Build
+.next/
+dist/
+build/
+
+# Logs
+*.log
